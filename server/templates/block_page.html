@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Access Restricted - Network Policy</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #f0f2f5;
+            color: #1c1e21;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        .container {
+            background: #ffffff;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            width: 100%;
+            max-width: 480px;
+            padding: 2rem;
+            text-align: center;
+            border-top: 5px solid #d32f2f;
+        }
+        .shield-icon {
+            width: 56px;
+            height: 56px;
+            margin: 0 auto 1rem;
+            fill: #d32f2f;
+        }
+        h1 {
+            font-size: 1.4rem;
+            color: #d32f2f;
+            margin-bottom: 0.75rem;
+        }
+        p {
+            font-size: 0.95rem;
+            line-height: 1.5;
+            color: #555;
+            margin-bottom: 1.25rem;
+        }
+        .domain-tag {
+            display: inline-block;
+            background: #fde8e8;
+            color: #9b1c1c;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-weight: 600;
+            font-family: monospace;
+            word-break: break-all;
+        }
+        .btn {
+            background: #1a73e8;
+            color: #fff;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.2s;
+            width: 100%;
+        }
+        .btn:hover { background: #1557b0; }
+        .btn:disabled { background: #9aa0a6; cursor: not-allowed; }
+        .unlock-card {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 1.25rem;
+            margin-top: 1.25rem;
+            text-align: left;
+        }
+        .input-group {
+            margin-bottom: 1rem;
+        }
+        .input-group label {
+            display: block;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 0.35rem;
+            color: #333;
+        }
+        .input-group input {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            font-size: 1.1rem;
+            letter-spacing: 3px;
+            text-align: center;
+            text-transform: uppercase;
+        }
+        .status-msg {
+            margin-top: 1rem;
+            font-size: 0.9rem;
+            font-weight: 500;
+            min-height: 1.2rem;
+        }
+        .status-success { color: #1e7e34; }
+        .status-error { color: #d32f2f; }
+        .status-info { color: #1a73e8; }
+        .footer-note {
+            font-size: 0.8rem;
+            color: #888;
+            margin-top: 1.5rem;
+            border-top: 1px solid #eee;
+            padding-top: 0.75rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <svg class="shield-icon" viewBox="0 0 24 24">
+            <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
+        </svg>
+
+        <h1>Access Blocked</h1>
+        <p>This network has restricted access to gambling and wagering content.</p>
+        <p>Requested Domain: <span class="domain-tag" id="domainLabel">{{ domain }}</span></p>
+
+        <div id="requestArea">
+            <button class="btn" id="requestBtn" onclick="requestKey()">Request Unlock Key</button>
+            <p style="font-size:0.8rem; color:#666; margin-top:0.5rem;">The authorization key will be sent via email to the administrator ($MOTHER).</p>
+        </div>
+
+        <div class="unlock-card" id="unlockArea" style="display:none;">
+            <div class="input-group">
+                <label for="otpKey">Enter 6-Character Key from Email:</label>
+                <input type="text" id="otpKey" maxlength="6" placeholder="XXXXXX" autocomplete="off" autocorrect="off" autocapitalize="characters">
+            </div>
+            <button class="btn" id="submitBtn" onclick="submitKey()">Authorize Access (1 Hour)</button>
+        </div>
+
+        <div class="status-msg" id="statusMsg"></div>
+
+        <div class="footer-note">
+            Enforced by Local Gateway AI Content Filter
+        </div>
+    </div>
+
+    <script>
+        const domain = "{{ domain }}";
+
+        function setStatus(text, type = "info") {
+            const el = document.getElementById("statusMsg");
+            el.className = "status-msg status-" + type;
+            el.innerText = text;
+        }
+
+        async function requestKey() {
+            const reqBtn = document.getElementById("requestBtn");
+            reqBtn.disabled = true;
+            setStatus("Generating secure token and emailing $MOTHER...", "info");
+
+            const formData = new FormData();
+            formData.append("domain", domain);
+
+            try {
+                const res = await fetch("/request-key", { method: "POST", body: formData });
+                const data = await res.json();
+                if (res.ok) {
+                    setStatus(data.message, "success");
+                    document.getElementById("unlockArea").style.display = "block";
+                } else {
+                    setStatus(data.message || data.detail || "Failed to send authorization request.", "error");
+                    reqBtn.disabled = false;
+                }
+            } catch (err) {
+                setStatus("Network communication error. Check gateway connection.", "error");
+                reqBtn.disabled = false;
+            }
+        }
+
+        async function submitKey() {
+            const keyInput = document.getElementById("otpKey");
+            const key = keyInput.value.trim().toUpperCase();
+            if (!key || key.length < 4) {
+                setStatus("Please enter the complete authorization key.", "error");
+                return;
+            }
+
+            const subBtn = document.getElementById("submitBtn");
+            subBtn.disabled = true;
+            setStatus("Verifying key...", "info");
+
+            const formData = new FormData();
+            formData.append("domain", domain);
+            formData.append("key", key);
+
+            try {
+                const res = await fetch("/submit-key", { method: "POST", body: formData });
+                const data = await res.json();
+                if (res.ok) {
+                    setStatus("Access Approved! Whitelisted for 1 hour. Redirecting...", "success");
+                    setTimeout(() => {
+                        window.location.href = "http://" + domain;
+                    }, 2500);
+                } else {
+                    setStatus(data.detail || data.message || "Invalid or expired key.", "error");
+                    subBtn.disabled = false;
+                }
+            } catch (err) {
+                setStatus("Error verifying key with gateway.", "error");
+                subBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>

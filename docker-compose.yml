@@ -1,0 +1,49 @@
+version: '3.8'
+
+networks:
+  virtual_lan:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+services:
+  # 1. AI Classifier & Web Unlock Portal Gateway
+  filter-gateway:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: filter-gateway
+    env_file: .env
+    ports:
+      - "8080:8080"
+    networks:
+      virtual_lan:
+        ipv4_address: 172.28.0.10
+    restart: unless-stopped
+
+  # 2. Local AI Engine (Ollama)
+  local-ai:
+    image: ollama/ollama:latest
+    container_name: local-ai
+    volumes:
+      - ./ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      virtual_lan:
+        ipv4_address: 172.28.0.20
+    restart: unless-stopped
+
+  # 3. Simulated Client (to test blocking & bypass prevention)
+  test-client:
+    image: alpine:latest
+    container_name: test-client
+    stdin_open: true
+    tty: true
+    command: /bin/sh -c "apk add --no-cache curl bind-tools && sleep infinity"
+    networks:
+      virtual_lan:
+        ipv4_address: 172.28.0.100
+    depends_on:
+      - filter-gateway
