@@ -44,7 +44,7 @@ podman run -d \
   --name filter-gateway \
   --network filter-net \
   -p 8080:8080 \
-  -p 1053:53/udp \
+  -p 53:53/udp \
   --env-file .env \
   --restart unless-stopped \
   localhost/filter-gateway:latest
@@ -90,3 +90,30 @@ Run the verification suite to test DNS sinkholing, AI classification, and `$MOTH
 2. Navigate to **DHCP Settings > Primary DNS**.
 3. Set **Primary DNS** to `192.168.1.7`.
 4. All connected phones, laptops, and tablets are now protected.
+
+---
+
+## 5. Squid Filter Proxy (No DNS Changes Needed)
+
+`deploy.sh` also builds and runs a Squid forward proxy (`filter-proxy`
+container, port `3128`). It asks `filter-gateway` for a live verdict on every
+domain, for both plain HTTP and HTTPS (HTTPS is filtered by CONNECT hostname —
+no certificate install needed).
+
+### Phone setup (per device, 1 minute)
+1. Connect to home Wi-Fi.
+2. Open Wi-Fi details for the network > **Proxy** > **Manual**.
+3. Hostname `192.168.1.8`, port `3128`. Save.
+4. Browse: safe sites load, gambling sites land on the block page (HTTP) or a
+   proxy error (HTTPS). Unlock keys work via the block page as usual.
+
+### Verify from a terminal
+```bash
+curl -x http://192.168.1.8:3128 http://example.com/ -o /dev/null -w "%{http_code}\n"   # 200
+curl -x http://192.168.1.8:3128 http://pokerstars.com/ -D - -o /dev/null | grep -i location  # 302 to /blocked
+```
+
+### Notes
+- The proxy helper (`proxy/gambling_helper.py`) queries `check-dns` per new
+  domain (300s cache) and fails closed: classifier down = blocked.
+- Rebuild after config edits: `./deploy.sh` (rebuilds both images).

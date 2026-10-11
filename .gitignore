@@ -1,7 +1,6 @@
 .env
-.env
-server/__pycache__/app.cpython-314.pyc
-.gitignore
-.gitignore
-server/__pycache__/onnx_classifier.cpython-314.pyc
-server/__pycache__/test_app.cpython-314-pytest-9.1.1.pyc
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+ollama_data/

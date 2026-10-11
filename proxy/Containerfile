@@ -1,0 +1,14 @@
+FROM docker.io/ubuntu/squid:latest
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY squid.conf.template /etc/squid/squid.conf.template
+COPY gambling_helper.py /usr/local/bin/gambling_helper.py
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /usr/local/bin/gambling_helper.py /entrypoint.sh
+
+EXPOSE 3128
+ENTRYPOINT ["/entrypoint.sh"]

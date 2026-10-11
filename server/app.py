@@ -91,7 +91,7 @@ If you did not approve this request, ignore this message.
     )
 
     if is_dummy_smtp:
-        logger.warning(f"[DISPATCH TO $MOTHER] Mock/Dev Mode: Key for {domain} dispatched to $MOTHER ({MOTHER_EMAIL}): {key}")
+        logger.warning(f"[DISPATCH TO $MOTHER] Mock/Dev Mode: Key for {domain} dispatched to $MOTHER ({MOTHER_EMAIL}): {key} [client {client_ip}]")
         return True
 
     try:
@@ -99,20 +99,21 @@ If you did not approve this request, ignore this message.
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
-        logger.info(f"Successfully emailed unlock key for {domain} to $MOTHER ({MOTHER_EMAIL})")
+        logger.info(f"Successfully emailed unlock key for {domain} to $MOTHER ({MOTHER_EMAIL}) [client {client_ip}]")
         return True
     except Exception as ex:
-        logger.error(f"Live SMTP delivery failed: {ex}. Key logged for $MOTHER ({MOTHER_EMAIL}): {key}")
+        logger.error(f"Live SMTP delivery failed: {ex}. Key logged for $MOTHER ({MOTHER_EMAIL}): {key} [client {client_ip}]")
         return True
 
 
-async def classify_domain_with_ai(domain: str) -> bool:
+async def classify_domain_with_ai(domain: str, client_ip: str = "?") -> bool:
     """Uses embedded ONNX Runtime classifier or Ollama LLM + heuristics to detect gambling sites."""
     clean_domain = re.sub(r"^https?://", "", domain).split("/")[0].lower().rstrip(".")
 
     if clean_domain in verdict_cache:
         cached = verdict_cache[clean_domain]
         if utc_now() < cached["expires"]:
+            logger.debug(f"[CACHE] Domain: {clean_domain} -> is_gambling={cached['is_gambling']} [client {client_ip}]")
             return cached["is_gambling"]
 
     # 1. Quick regex heuristic
@@ -122,7 +123,7 @@ async def classify_domain_with_ai(domain: str) -> bool:
     # 2. ONNX Runtime Classification (<2ms)
     if AI_ENGINE in ("onnx", "hybrid", "auto") and onnx_classifier and onnx_classifier.is_ready:
         onnx_verdict, score = onnx_classifier.predict(clean_domain)
-        logger.info(f"[ONNX CLASSIFIER] Domain: {clean_domain} -> is_gambling={onnx_verdict} (confidence={score:.4f})")
+        logger.info(f"[ONNX CLASSIFIER] Domain: {clean_domain} -> is_gambling={onnx_verdict} (confidence={score:.4f}) [client {client_ip}]")
         if onnx_verdict or heuristic_match:
             is_gambling = True
         else:
@@ -150,7 +151,7 @@ Domain: {clean_domain} ->"""
                         is_gambling = True
                     elif f"{clean_domain.upper()} -> NO" in output or "NON-GAMBLING" in output or "EDUCATIONAL" in output:
                         is_gambling = False or heuristic_match
-                    logger.info(f"[OLLAMA CLASSIFIER] Domain: {clean_domain} -> AI Output: '{output[:60]}...' -> Final: is_gambling={is_gambling}")
+                    logger.info(f"[OLLAMA CLASSIFIER] Domain: {clean_domain} -> AI Output: '{output[:60]}...' -> Final: is_gambling={is_gambling} [client {client_ip}]")
         except Exception as e:
             logger.warning(f"Ollama classifier at {OLLAMA_HOST} unreachable ({e}). Relying on keyword heuristic.")
 
@@ -265,10 +266,12 @@ async def check_dns(domain: str = Query(...), client_ip: str = Query("127.0.0.1"
     client_data = whitelisted_clients.get(client_ip)
     if client_data and utc_now() < client_data["expires"]:
         if clean_domain in client_data["domains"] or "*" in client_data["domains"]:
+            logger.info(f"[CHECK] Domain: {clean_domain} -> ALLOW (whitelisted) [client {client_ip}]")
             return {"action": "ALLOW", "domain": clean_domain, "reason": "whitelisted"}
 
-    is_gambling = await classify_domain_with_ai(clean_domain)
+    is_gambling = await classify_domain_with_ai(clean_domain, client_ip)
     if is_gambling:
+        logger.info(f"[CHECK] Domain: {clean_domain} -> BLOCK [client {client_ip}]")
         return {
             "action": "BLOCK",
             "domain": clean_domain,
@@ -277,12 +280,13 @@ async def check_dns(domain: str = Query(...), client_ip: str = Query("127.0.0.1"
             "reason": "AI classified as gambling site",
         }
 
+    logger.info(f"[CHECK] Domain: {clean_domain} -> ALLOW [client {client_ip}]")
     return {"action": "ALLOW", "domain": clean_domain, "reason": "safe"}
 
 
 @app.get("/blocked", response_class=HTMLResponse)
 async def blocked_view(request: Request, domain: str = Query("gambling-site.com")):
-    return templates.TemplateResponse("block_page.html", {"request": request, "domain": domain})
+    return templates.TemplateResponse(request, "block_page.html", {"request": request, "domain": domain})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -290,8 +294,8 @@ async def root_interceptor(request: Request):
     """Catches wildcard HTTP requests to intercepted domains."""
     host = request.headers.get("host", "").split(":")[0]
     if host in [GATEWAY_IP, "localhost", "127.0.0.1"]:
-        return templates.TemplateResponse("block_page.html", {"request": request, "domain": "gambling-site.com"})
-    return templates.TemplateResponse("block_page.html", {"request": request, "domain": host})
+        return templates.TemplateResponse(request, "block_page.html", {"request": request, "domain": "gambling-site.com"})
+    return templates.TemplateResponse(request, "block_page.html", {"request": request, "domain": host})
 
 
 @app.post("/request-key")
@@ -308,6 +312,7 @@ async def request_key(request: Request, domain: str = Form(...), client_ip: Opti
 
     try:
         send_key_to_mother(clean_domain, ip, token)
+        logger.info(f"[KEY] Issued key for {clean_domain} [client {ip}]")
         return JSONResponse(
             {
                 "status": "success",
@@ -315,7 +320,7 @@ async def request_key(request: Request, domain: str = Form(...), client_ip: Opti
             }
         )
     except Exception as e:
-        logger.error(f"Error dispatching email: {e}")
+        logger.error(f"Error dispatching email: {e} [client {ip}]")
         return JSONResponse(
             {"status": "error", "message": f"Unable to deliver authorization email: {str(e)}"},
             status_code=500,
@@ -330,9 +335,11 @@ async def submit_key(request: Request, domain: str = Form(...), key: str = Form(
 
     record = active_tokens.get(clean_domain)
     if not record or utc_now() > record["expires"]:
+        logger.warning(f"[KEY] Rejected submit for {clean_domain}: expired or not requested [client {ip}]")
         raise HTTPException(status_code=400, detail="Authorization key is expired or was not requested.")
 
     if record["key"] != provided_key:
+        logger.warning(f"[KEY] Rejected submit for {clean_domain}: invalid key [client {ip}]")
         raise HTTPException(status_code=403, detail="Invalid authorization key.")
 
     target_ip = record.get("client_ip", ip)
