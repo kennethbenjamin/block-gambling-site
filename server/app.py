@@ -3,18 +3,16 @@ import logging
 import os
 import re
 import secrets
-import smtplib
 import socket
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 from typing import Dict, Optional
 
 import httpx
 from dnslib import A, DNSRecord, QTYPE, RR
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -25,10 +23,10 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 # Environment Variables
 MOTHER_EMAIL = os.environ.get("MOTHER", "mother@example.com")
-SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASS = os.environ.get("SMTP_PASS", "")
+EMAIL_ENABLED = os.environ.get("EMAIL_ENABLED", "false").lower() == "true"
+CLOUDFLARE_TOKEN = os.environ.get("CLOUDFLARE_TOKEN", "")
+CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+CLOUDFLARE_FROM_EMAIL = os.environ.get("CLOUDFLARE_FROM_EMAIL", "")
 AI_ENGINE = os.environ.get("AI_ENGINE", "onnx").lower()  # "onnx", "ollama", or "hybrid"
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 AI_MODEL = os.environ.get("AI_MODEL", "llama3.2:1b")
@@ -49,7 +47,8 @@ KNOWN_GAMBLING_KEYWORDS = [
     "bet", "betting", "casino", "poker", "slots", "gamble", "gambling",
     "wagering", "jackpot", "roulette", "blackjack", "sportsbook", "lottery",
     "baccarat", "bookmaker", "onlinebet", "pokerstars", "draftkings", "fanduel",
-    "888casino", "bet365", "stake.com", "bovada", "betfair", "jackpotcity"
+    "888casino", "bet365", "stake.com", "bovada", "betfair", "jackpotcity",
+    "gamezone", "arenaplus", "ptgaming", "casinoplus"
 ]
 
 
@@ -58,16 +57,12 @@ def utc_now() -> datetime:
 
 
 def send_key_to_mother(domain: str, client_ip: str, key: str):
-    """Sends OTP unlock key directly to the MOTHER variable email."""
+    """Sends OTP unlock key via Cloudflare Email API."""
     if not MOTHER_EMAIL:
         raise ValueError("Environment variable MOTHER is not configured.")
 
-    msg = EmailMessage()
-    msg["Subject"] = f"[NETWORK ALERT] Wi-Fi Gambling Unlock Request: {domain}"
-    msg["From"] = SMTP_USER or "network-filter@home.gateway"
-    msg["To"] = MOTHER_EMAIL
-
-    body = f"""Hello,
+    subject = f"[NETWORK ALERT] Wi-Fi Gambling Unlock Request: {domain}"
+    text_body = f"""Hello,
 
 A device on your Wi-Fi network ({client_ip}) attempted to access a gambling site:
 Domain: {domain}
@@ -81,39 +76,66 @@ KEY: {key}
 This key will expire in 10 minutes.
 If you did not approve this request, ignore this message.
 """
-    msg.set_content(body)
+    html_body = f"""<h2>Network Gambling Filter Alert</h2>
+<p>A device on your Wi-Fi network (<strong>{client_ip}</strong>) attempted to access a gambling site:</p>
+<ul>
+<li><strong>Domain:</strong> {domain}</li>
+<li><strong>Time:</strong> {utc_now().strftime('%Y-%m-%d %H:%M:%S UTC')}</li>
+</ul>
+<p>If you approve temporary access (1 hour), use this authorization key:</p>
+<p style="font-size:1.4em;letter-spacing:4px;font-family:monospace;background:#fde8e8;padding:12px;text-align:center;border-radius:6px;"><strong>{key}</strong></p>
+<p style="color:#888;font-size:0.85em;">This key expires in 10 minutes. If you did not approve this request, ignore this message.</p>
+"""
 
-    is_dummy_smtp = (
-        not SMTP_USER
-        or not SMTP_PASS
-        or "your-" in SMTP_USER.lower()
-        or "example" in SMTP_USER.lower()
+    is_dummy = (
+        not EMAIL_ENABLED
+        or not CLOUDFLARE_TOKEN
+        or not CLOUDFLARE_ACCOUNT_ID
+        or not CLOUDFLARE_FROM_EMAIL
+        or "yourdomain" in CLOUDFLARE_FROM_EMAIL.lower()
+        or "gmail" in CLOUDFLARE_FROM_EMAIL.lower()
+        or "example" in MOTHER_EMAIL.lower()
     )
 
-    if is_dummy_smtp:
-        logger.warning(f"[DISPATCH TO $MOTHER] Mock/Dev Mode: Key for {domain} dispatched to $MOTHER ({MOTHER_EMAIL}): {key} [client {client_ip}]")
+    if is_dummy:
+        logger.warning(f"[DISPATCH TO $MOTHER] Mock/Dev Mode: Key for {domain} dispatched to $MOTHER ({MOTHER_EMAIL}): {key}")
         return True
+
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/email/sending/send"
+    payload = {
+        "to": MOTHER_EMAIL,
+        "from": CLOUDFLARE_FROM_EMAIL,
+        "subject": subject,
+        "html": html_body,
+        "text": text_body,
+    }
+    headers = {
+        "Authorization": f"Bearer {CLOUDFLARE_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
     try:
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=3) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
-        logger.info(f"Successfully emailed unlock key for {domain} to $MOTHER ({MOTHER_EMAIL}) [client {client_ip}]")
-        return True
+        resp = httpx.post(url, json=payload, headers=headers, timeout=10.0)
+        resp.raise_for_status()
+        result = resp.json()
+        if result.get("success"):
+            logger.info(f"Cloudflare email sent for {domain} to $MOTHER ({MOTHER_EMAIL})")
+            return True
+        else:
+            logger.error(f"Cloudflare API error: {result.get('errors')}. Key: {key}")
+            return True
     except Exception as ex:
-        logger.error(f"Live SMTP delivery failed: {ex}. Key logged for $MOTHER ({MOTHER_EMAIL}): {key} [client {client_ip}]")
+        logger.error(f"Cloudflare email delivery failed: {ex}. Key logged for $MOTHER ({MOTHER_EMAIL}): {key}")
         return True
 
 
-async def classify_domain_with_ai(domain: str, client_ip: str = "?") -> bool:
+async def classify_domain_with_ai(domain: str) -> bool:
     """Uses embedded ONNX Runtime classifier or Ollama LLM + heuristics to detect gambling sites."""
     clean_domain = re.sub(r"^https?://", "", domain).split("/")[0].lower().rstrip(".")
 
     if clean_domain in verdict_cache:
         cached = verdict_cache[clean_domain]
         if utc_now() < cached["expires"]:
-            logger.debug(f"[CACHE] Domain: {clean_domain} -> is_gambling={cached['is_gambling']} [client {client_ip}]")
             return cached["is_gambling"]
 
     # 1. Quick regex heuristic
@@ -123,7 +145,7 @@ async def classify_domain_with_ai(domain: str, client_ip: str = "?") -> bool:
     # 2. ONNX Runtime Classification (<2ms)
     if AI_ENGINE in ("onnx", "hybrid", "auto") and onnx_classifier and onnx_classifier.is_ready:
         onnx_verdict, score = onnx_classifier.predict(clean_domain)
-        logger.info(f"[ONNX CLASSIFIER] Domain: {clean_domain} -> is_gambling={onnx_verdict} (confidence={score:.4f}) [client {client_ip}]")
+        logger.info(f"[ONNX CLASSIFIER] Domain: {clean_domain} -> is_gambling={onnx_verdict} (confidence={score:.4f})")
         if onnx_verdict or heuristic_match:
             is_gambling = True
         else:
@@ -151,7 +173,7 @@ Domain: {clean_domain} ->"""
                         is_gambling = True
                     elif f"{clean_domain.upper()} -> NO" in output or "NON-GAMBLING" in output or "EDUCATIONAL" in output:
                         is_gambling = False or heuristic_match
-                    logger.info(f"[OLLAMA CLASSIFIER] Domain: {clean_domain} -> AI Output: '{output[:60]}...' -> Final: is_gambling={is_gambling} [client {client_ip}]")
+                    logger.info(f"[OLLAMA CLASSIFIER] Domain: {clean_domain} -> AI Output: '{output[:60]}...' -> Final: is_gambling={is_gambling}")
         except Exception as e:
             logger.warning(f"Ollama classifier at {OLLAMA_HOST} unreachable ({e}). Relying on keyword heuristic.")
 
@@ -236,6 +258,16 @@ def dns_worker_loop():
 async def lifespan(app: FastAPI):
     dns_thread = threading.Thread(target=dns_worker_loop, daemon=True)
     dns_thread.start()
+    try:
+        from tls_intercept import start_https_intercept, ca_cert_pem
+        start_https_intercept(host="0.0.0.0", port=443)
+        pem = ca_cert_pem()
+        os.makedirs("/certs", exist_ok=True)
+        with open("/certs/ca.crt", "wb") as f:
+            f.write(pem)
+        logger.info("[TLS] HTTPS intercept started, CA at /certs/ca.crt")
+    except Exception as e:
+        logger.warning(f"HTTPS intercept failed to start: {e}")
     yield
 
 
@@ -266,12 +298,10 @@ async def check_dns(domain: str = Query(...), client_ip: str = Query("127.0.0.1"
     client_data = whitelisted_clients.get(client_ip)
     if client_data and utc_now() < client_data["expires"]:
         if clean_domain in client_data["domains"] or "*" in client_data["domains"]:
-            logger.info(f"[CHECK] Domain: {clean_domain} -> ALLOW (whitelisted) [client {client_ip}]")
             return {"action": "ALLOW", "domain": clean_domain, "reason": "whitelisted"}
 
-    is_gambling = await classify_domain_with_ai(clean_domain, client_ip)
+    is_gambling = await classify_domain_with_ai(clean_domain)
     if is_gambling:
-        logger.info(f"[CHECK] Domain: {clean_domain} -> BLOCK [client {client_ip}]")
         return {
             "action": "BLOCK",
             "domain": clean_domain,
@@ -280,13 +310,18 @@ async def check_dns(domain: str = Query(...), client_ip: str = Query("127.0.0.1"
             "reason": "AI classified as gambling site",
         }
 
-    logger.info(f"[CHECK] Domain: {clean_domain} -> ALLOW [client {client_ip}]")
     return {"action": "ALLOW", "domain": clean_domain, "reason": "safe"}
 
 
 @app.get("/blocked", response_class=HTMLResponse)
 async def blocked_view(request: Request, domain: str = Query("gambling-site.com")):
-    return templates.TemplateResponse(request, "block_page.html", {"request": request, "domain": domain})
+    return templates.TemplateResponse(request, "block_page.html", {"domain": domain})
+
+
+@app.get("/ca.pem")
+async def ca_pem():
+    from tls_intercept import ca_cert_pem
+    return Response(content=ca_cert_pem(), media_type="application/x-pem-file")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -294,8 +329,8 @@ async def root_interceptor(request: Request):
     """Catches wildcard HTTP requests to intercepted domains."""
     host = request.headers.get("host", "").split(":")[0]
     if host in [GATEWAY_IP, "localhost", "127.0.0.1"]:
-        return templates.TemplateResponse(request, "block_page.html", {"request": request, "domain": "gambling-site.com"})
-    return templates.TemplateResponse(request, "block_page.html", {"request": request, "domain": host})
+        return templates.TemplateResponse(request, "block_page.html", {"domain": "gambling-site.com"})
+    return templates.TemplateResponse(request, "block_page.html", {"domain": host})
 
 
 @app.post("/request-key")
@@ -312,7 +347,6 @@ async def request_key(request: Request, domain: str = Form(...), client_ip: Opti
 
     try:
         send_key_to_mother(clean_domain, ip, token)
-        logger.info(f"[KEY] Issued key for {clean_domain} [client {ip}]")
         return JSONResponse(
             {
                 "status": "success",
@@ -320,7 +354,7 @@ async def request_key(request: Request, domain: str = Form(...), client_ip: Opti
             }
         )
     except Exception as e:
-        logger.error(f"Error dispatching email: {e} [client {ip}]")
+        logger.error(f"Error dispatching email: {e}")
         return JSONResponse(
             {"status": "error", "message": f"Unable to deliver authorization email: {str(e)}"},
             status_code=500,
@@ -335,11 +369,9 @@ async def submit_key(request: Request, domain: str = Form(...), key: str = Form(
 
     record = active_tokens.get(clean_domain)
     if not record or utc_now() > record["expires"]:
-        logger.warning(f"[KEY] Rejected submit for {clean_domain}: expired or not requested [client {ip}]")
         raise HTTPException(status_code=400, detail="Authorization key is expired or was not requested.")
 
     if record["key"] != provided_key:
-        logger.warning(f"[KEY] Rejected submit for {clean_domain}: invalid key [client {ip}]")
         raise HTTPException(status_code=403, detail="Invalid authorization key.")
 
     target_ip = record.get("client_ip", ip)

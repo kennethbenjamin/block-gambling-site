@@ -90,7 +90,7 @@ class DomainClassifierONNX:
 
         return features.reshape(1, -1)
 
-    def predict(self, domain: str, threshold: float = 0.5) -> Tuple[bool, float]:
+    def predict(self, domain: str, threshold: float = 0.6) -> Tuple[bool, float]:
         """Returns (is_gambling, probability_score)."""
         if not self.is_ready or self.session is None:
             return False, 0.0

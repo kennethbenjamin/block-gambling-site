@@ -14,40 +14,16 @@ services:
     env_file: .env
     ports:
       - "8080:8080"
-    networks:
-      - virtual_lan
-    restart: unless-stopped
-
-  # 1b. Squid Filter Proxy (asks filter-gateway per domain)
-  filter-proxy:
-    build:
-      context: ./proxy
-      dockerfile: Containerfile
-    container_name: filter-proxy
-    environment:
-      - GATEWAY_URL=http://192.168.1.8:8080
-      - GATEWAY_API=http://filter-gateway:8080
-    ports:
-      - "3128:3128"
-    networks:
-      - virtual_lan
-    restart: unless-stopped
-    depends_on:
-      - filter-gateway
-
-  # 2. Local AI Engine (Ollama)
-  local-ai:
-    image: docker.io/ollama/ollama:latest
-    container_name: local-ai
+      - "443:443"
+      - "127.0.0.1:53:53/udp"
+      - "192.168.1.8:53:53/udp"
     volumes:
-      - /media/daddy/data/application/ollama_data:/root/.ollama:Z
-    ports:
-      - "11434:11434"
+      - ./certs:/certs
     networks:
       - virtual_lan
     restart: unless-stopped
 
-  # 3. Simulated Client (to test blocking & bypass prevention)
+  # 2. Simulated Client (to test blocking & bypass prevention)
   test-client:
     image: docker.io/library/alpine:latest
     container_name: test-client
