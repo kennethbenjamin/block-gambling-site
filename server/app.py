@@ -29,10 +29,16 @@ SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASS = os.environ.get("SMTP_PASS", "")
+AI_ENGINE = os.environ.get("AI_ENGINE", "onnx").lower()  # "onnx", "ollama", or "hybrid"
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 AI_MODEL = os.environ.get("AI_MODEL", "llama3.2:1b")
 GATEWAY_IP = os.environ.get("GATEWAY_IP", "192.168.1.7")
 UPSTREAM_DNS = os.environ.get("UPSTREAM_DNS", "1.1.1.1")
+
+try:
+    from onnx_classifier import onnx_classifier
+except ImportError:
+    onnx_classifier = None
 
 # In-memory storage (production can use Redis)
 verdict_cache: Dict[str, Dict] = {}
@@ -101,7 +107,7 @@ If you did not approve this request, ignore this message.
 
 
 async def classify_domain_with_ai(domain: str) -> bool:
-    """Uses few-shot LLM (Ollama) + heuristic analysis to detect gambling sites."""
+    """Uses embedded ONNX Runtime classifier or Ollama LLM + heuristics to detect gambling sites."""
     clean_domain = re.sub(r"^https?://", "", domain).split("/")[0].lower().rstrip(".")
 
     if clean_domain in verdict_cache:
@@ -111,9 +117,20 @@ async def classify_domain_with_ai(domain: str) -> bool:
 
     # 1. Quick regex heuristic
     heuristic_match = any(kw in clean_domain for kw in KNOWN_GAMBLING_KEYWORDS)
+    is_gambling = heuristic_match
 
-    # 2. AI Few-Shot Classification
-    prompt = f"""Classify if the domain is a GAMBLING, CASINO, or SPORTS BETTING website.
+    # 2. ONNX Runtime Classification (<2ms)
+    if AI_ENGINE in ("onnx", "hybrid", "auto") and onnx_classifier and onnx_classifier.is_ready:
+        onnx_verdict, score = onnx_classifier.predict(clean_domain)
+        logger.info(f"[ONNX CLASSIFIER] Domain: {clean_domain} -> is_gambling={onnx_verdict} (confidence={score:.4f})")
+        if onnx_verdict or heuristic_match:
+            is_gambling = True
+        else:
+            is_gambling = False
+
+    # 3. Fallback to Ollama LLM if configured or requested
+    elif AI_ENGINE == "ollama":
+        prompt = f"""Classify if the domain is a GAMBLING, CASINO, or SPORTS BETTING website.
 
 Examples:
 Domain: bet365.com -> YES
@@ -121,23 +138,21 @@ Domain: wikipedia.org -> NO
 Domain: pokerstars.com -> YES
 Domain: github.com -> NO
 Domain: {clean_domain} ->"""
-
-    is_gambling = heuristic_match
-    try:
-        async with httpx.AsyncClient(timeout=4.0) as client:
-            res = await client.post(
-                f"{OLLAMA_HOST}/api/generate",
-                json={"model": AI_MODEL, "prompt": prompt, "stream": False},
-            )
-            if res.status_code == 200:
-                output = res.json().get("response", "").upper()
-                if f"{clean_domain.upper()} -> YES" in output or ("YES" in output and "NON-GAMBLING" not in output and "NOT" not in output):
-                    is_gambling = True
-                elif f"{clean_domain.upper()} -> NO" in output or "NON-GAMBLING" in output or "EDUCATIONAL" in output:
-                    is_gambling = False or heuristic_match
-                logger.info(f"[AI CLASSIFIER] Domain: {clean_domain} -> AI Output: '{output[:60]}...' -> Final: is_gambling={is_gambling}")
-    except Exception as e:
-        logger.warning(f"AI classifier at {OLLAMA_HOST} unreachable ({e}). Relying on keyword heuristic.")
+        try:
+            async with httpx.AsyncClient(timeout=4.0) as client:
+                res = await client.post(
+                    f"{OLLAMA_HOST}/api/generate",
+                    json={"model": AI_MODEL, "prompt": prompt, "stream": False},
+                )
+                if res.status_code == 200:
+                    output = res.json().get("response", "").upper()
+                    if f"{clean_domain.upper()} -> YES" in output or ("YES" in output and "NON-GAMBLING" not in output and "NOT" not in output):
+                        is_gambling = True
+                    elif f"{clean_domain.upper()} -> NO" in output or "NON-GAMBLING" in output or "EDUCATIONAL" in output:
+                        is_gambling = False or heuristic_match
+                    logger.info(f"[OLLAMA CLASSIFIER] Domain: {clean_domain} -> AI Output: '{output[:60]}...' -> Final: is_gambling={is_gambling}")
+        except Exception as e:
+            logger.warning(f"Ollama classifier at {OLLAMA_HOST} unreachable ({e}). Relying on keyword heuristic.")
 
     verdict_cache[clean_domain] = {
         "is_gambling": is_gambling,
@@ -188,9 +203,16 @@ def dns_worker_loop():
             )
 
             if not is_whitelisted:
-                is_blocked = any(kw in qname for kw in KNOWN_GAMBLING_KEYWORDS)
-                if not is_blocked and qname in verdict_cache:
+                if qname in verdict_cache and utc_now() < verdict_cache[qname]["expires"]:
                     is_blocked = verdict_cache[qname].get("is_gambling", False)
+                else:
+                    is_blocked = any(kw in qname for kw in KNOWN_GAMBLING_KEYWORDS)
+                    if not is_blocked and onnx_classifier and onnx_classifier.is_ready:
+                        is_blocked, score = onnx_classifier.predict(qname)
+                    verdict_cache[qname] = {
+                        "is_gambling": is_blocked,
+                        "expires": utc_now() + timedelta(hours=24),
+                    }
 
             if is_blocked and qtype in ("A", "ANY"):
                 logger.info(f"[DNS SINKHOLE] Intercepted {qname} from {client_ip} -> Redirecting to {GATEWAY_IP}")
@@ -226,8 +248,11 @@ async def health_check():
         "container_isolated": True,
         "mother_configured": bool(MOTHER_EMAIL),
         "mother_address": MOTHER_EMAIL,
-        "ai_host": OLLAMA_HOST,
-        "ai_model": AI_MODEL,
+        "ai_engine": AI_ENGINE,
+        "onnx_ready": bool(onnx_classifier and onnx_classifier.is_ready),
+        "onnx_model": "domain_classifier.onnx" if (onnx_classifier and onnx_classifier.is_ready) else None,
+        "ai_host": OLLAMA_HOST if AI_ENGINE == "ollama" else "embedded-onnx",
+        "ai_model": AI_MODEL if AI_ENGINE == "ollama" else "onnx-tfidf-linear",
         "gateway_ip": GATEWAY_IP,
     }
 

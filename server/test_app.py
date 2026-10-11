@@ -16,6 +16,20 @@ def test_health_endpoint():
     data = res.json()
     assert data["status"] == "online"
     assert data["mother_configured"] is True
+    assert data["ai_engine"] == "onnx"
+    assert data["onnx_ready"] is True
+
+def test_onnx_classifier_direct():
+    from onnx_classifier import onnx_classifier
+    assert onnx_classifier.is_ready is True
+    
+    is_gambling, score = onnx_classifier.predict("pokerstars.com")
+    assert is_gambling is True
+    assert score > 0.5
+    
+    is_safe, score_safe = onnx_classifier.predict("wikipedia.org")
+    assert is_safe is False
+    assert score_safe < 0.5
 
 def test_block_gambling_domain():
     # 'betonline.ag' should be blocked
